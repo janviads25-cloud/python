@@ -1,0 +1,406 @@
+import http.server
+import socketserver
+import json
+import os
+import urllib.parse
+
+PORT = 8080
+DB_FILE = "contacts.json"
+
+# ==============================================================================
+# BACKEND STORAGE (File Handling)
+# ==============================================================================
+
+def load_contacts():
+    """Load persistent contacts from file."""
+    if not os.path.exists(DB_FILE):
+        return []
+    try:
+        with open(DB_FILE, "r") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        return []
+
+def save_contacts(contacts):
+    """Save contacts permanently to JSON file."""
+    with open(DB_FILE, "w") as f:
+        json.dump(contacts, f, indent=4)
+
+
+# ==============================================================================
+# MODULE 1: Add and Store Contact Details
+# ==============================================================================
+
+def add_contact(name, phone, email):
+    name = (name or "").strip()
+    phone = (phone or "").strip()
+    email = (email or "").strip()
+
+    if not name or not phone:
+        return False, "Name and Phone Number are required fields."
+
+    contacts = load_contacts()
+    for c in contacts:
+        if c.get("phone", "").strip() == phone:
+            return False, f"Contact with phone number '{phone}' already exists."
+
+    new_contact = {
+        "name": name,
+        "phone": phone,
+        "email": email
+    }
+    contacts.append(new_contact)
+    save_contacts(contacts)
+    return True, f"Contact '{name}' added successfully!"
+
+
+# ==============================================================================
+# MODULE 2: Display Contacts & Search by Name or Phone
+# ==============================================================================
+
+def get_all_contacts():
+    return load_contacts()
+
+def search_contacts(query):
+    query = (query or "").strip().lower()
+    contacts = load_contacts()
+    if not query:
+        return contacts
+    return [
+        c for c in contacts
+        if query in c.get("name", "").lower() or query in c.get("phone", "").lower()
+    ]
+
+
+# ==============================================================================
+# MODULE 3: Update or Delete Existing Contacts
+# ==============================================================================
+
+def update_contact(original_phone, new_name, new_phone, new_email):
+    contacts = load_contacts()
+    target_idx = None
+
+    for idx, c in enumerate(contacts):
+        if c.get("phone", "").strip() == original_phone.strip():
+            target_idx = idx
+            break
+
+    if target_idx is None:
+        return False, f"Contact with phone number '{original_phone}' not found."
+
+    new_phone = (new_phone or "").strip()
+    new_name = (new_name or "").strip()
+    new_email = (new_email or "").strip()
+
+    # Prevent duplicate phone numbers if changing phone
+    if new_phone and new_phone != original_phone:
+        for idx, c in enumerate(contacts):
+            if idx != target_idx and c.get("phone", "").strip() == new_phone:
+                return False, f"Phone number '{new_phone}' is already assigned to another contact."
+        contacts[target_idx]["phone"] = new_phone
+
+    if new_name:
+        contacts[target_idx]["name"] = new_name
+    if new_email:
+        contacts[target_idx]["email"] = new_email
+
+    save_contacts(contacts)
+    return True, "Contact updated successfully!"
+
+def delete_contact(phone):
+    contacts = load_contacts()
+    updated = [c for c in contacts if c.get("phone", "").strip() != phone.strip()]
+
+    if len(contacts) == len(updated):
+        return False, f"Contact with phone number '{phone}' not found."
+
+    save_contacts(updated)
+    return True, f"Contact with phone number '{phone}' deleted successfully!"
+
+
+# ==============================================================================
+# MODULE 4: Menu-Driven Frontend Page Generator & Web Handler
+# ==============================================================================
+
+def get_html_frontend():
+    return '''<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Contact Book - Management System</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #f1f5f9; margin: 0; padding: 25px; color: #1e293b; }
+    .container { max-width: 900px; margin: 0 auto; }
+    header { text-align: center; margin-bottom: 25px; padding-bottom: 12px; border-bottom: 2px solid #cbd5e1; }
+    h1 { margin: 0; color: #0f172a; }
+    p.subtitle { color: #64748b; margin-top: 6px; }
+    .msg { display: none; padding: 10px; border-radius: 5px; margin-bottom: 15px; font-weight: bold; }
+    .msg-success { background: #dcfce7; color: #15803d; border: 1px solid #86efac; }
+    .msg-error { background: #fee2e2; color: #b91c1c; border: 1px solid #fca5a5; }
+    .grid { display: flex; gap: 20px; flex-wrap: wrap; }
+    .box { background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.08); }
+    .form-panel { flex: 1; min-width: 280px; }
+    .list-panel { flex: 2; min-width: 380px; }
+    label { display: block; font-size: 13px; font-weight: bold; margin-bottom: 4px; }
+    input[type="text"], input[type="email"] { width: 100%; box-sizing: border-box; padding: 8px 10px; margin-bottom: 12px; border: 1px solid #cbd5e1; border-radius: 4px; }
+    .btn { display: inline-block; width: 100%; padding: 9px; background: #059669; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; font-weight: bold; }
+    .btn:hover { background: #047857; }
+    .btn-cancel { background: #64748b; margin-top: 6px; display: none; }
+    .search-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .search-row input { margin-bottom: 0; flex: 1; }
+    .search-row button { width: auto; padding: 8px 14px; background: #2563eb; }
+    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+    th { background: #f8fafc; color: #475569; }
+    .btn-action { padding: 4px 8px; border: none; border-radius: 3px; cursor: pointer; font-size: 12px; color: white; }
+    .btn-edit { background: #2563eb; margin-right: 4px; }
+    .btn-del { background: #dc2626; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Contact Book System</h1>
+      <p class="subtitle">Python College Project (Modules 1 - 4)</p>
+    </header>
+
+    <div id="statusBox" class="msg"></div>
+
+    <div class="grid">
+      <!-- FORM PANEL -->
+      <div class="box form-panel">
+        <h3 id="formTitle">Add New Contact</h3>
+        <form id="contactForm">
+          <input type="hidden" id="origPhone">
+          <label>Full Name *</label>
+          <input type="text" id="name" required placeholder="Enter name">
+          
+          <label>Phone Number *</label>
+          <input type="text" id="phone" required placeholder="Enter phone">
+
+          <label>Email Address</label>
+          <input type="email" id="email" placeholder="Enter email">
+
+          <button type="submit" id="saveBtn" class="btn">Save Contact</button>
+          <button type="button" id="cancelBtn" class="btn btn-cancel" onclick="resetForm()">Cancel Edit</button>
+        </form>
+      </div>
+
+      <!-- DIRECTORY PANEL -->
+      <div class="box list-panel">
+        <h3>Saved Contacts</h3>
+        <div class="search-row">
+          <input type="text" id="search" placeholder="Search by name or phone..." oninput="searchData()">
+          <button type="button" class="btn" onclick="searchData()">Search</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Name</th>
+              <th>Phone</th>
+              <th>Email</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="5" style="text-align:center;">Loading...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentContacts = [];
+
+    function showMsg(text, isOk) {
+      const box = document.getElementById("statusBox");
+      box.textContent = text;
+      box.className = "msg " + (isOk ? "msg-success" : "msg-error");
+      box.style.display = "block";
+      setTimeout(() => { box.style.display = "none"; }, 3500);
+    }
+
+    async function loadData(query = "") {
+      try {
+        const url = query ? "/api/contacts?q=" + encodeURIComponent(query) : "/api/contacts";
+        const res = await fetch(url);
+        currentContacts = await res.json();
+        render();
+      } catch (e) {
+        showMsg("Could not connect to backend server.", false);
+      }
+    }
+
+    function render() {
+      const tbody = document.getElementById("tbody");
+      if (!currentContacts.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:#94a3b8;">No contacts found.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = currentContacts.map((c, i) => `
+        <tr>
+          <td>${i + 1}</td>
+          <td><strong>${c.name || ''}</strong></td>
+          <td>${c.phone || ''}</td>
+          <td>${c.email || '-'}</td>
+          <td>
+            <button class="btn-action btn-edit" onclick="editRow('${c.phone}')">Edit</button>
+            <button class="btn-action btn-del" onclick="deleteRow('${c.phone}')">Delete</button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function searchData() {
+      loadData(document.getElementById("search").value);
+    }
+
+    document.getElementById("contactForm").addEventListener("submit", async function(e) {
+      e.preventDefault();
+      const orig = document.getElementById("origPhone").value;
+      const payload = {
+        name: document.getElementById("name").value,
+        phone: document.getElementById("phone").value,
+        email: document.getElementById("email").value
+      };
+
+      if (orig) {
+        payload.original_phone = orig;
+        const res = await fetch("/api/contacts", {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const out = await res.json();
+        showMsg(out.message, out.success);
+        if (out.success) { resetForm(); loadData(); }
+      } else {
+        const res = await fetch("/api/contacts", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+        const out = await res.json();
+        showMsg(out.message, out.success);
+        if (out.success) { resetForm(); loadData(); }
+      }
+    });
+
+    function editRow(phone) {
+      const c = currentContacts.find(x => x.phone === phone);
+      if (!c) return;
+      document.getElementById("formTitle").textContent = "Update Contact";
+      document.getElementById("origPhone").value = c.phone;
+      document.getElementById("name").value = c.name;
+      document.getElementById("phone").value = c.phone;
+      document.getElementById("email").value = c.email || "";
+      document.getElementById("saveBtn").textContent = "Update Contact";
+      document.getElementById("cancelBtn").style.display = "block";
+    }
+
+    function resetForm() {
+      document.getElementById("contactForm").reset();
+      document.getElementById("origPhone").value = "";
+      document.getElementById("formTitle").textContent = "Add New Contact";
+      document.getElementById("saveBtn").textContent = "Save Contact";
+      document.getElementById("cancelBtn").style.display = "none";
+    }
+
+    async function deleteRow(phone) {
+      if (confirm("Delete contact with phone number " + phone + "?")) {
+        const res = await fetch("/api/contacts?phone=" + encodeURIComponent(phone), {
+          method: "DELETE"
+        });
+        const out = await res.json();
+        showMsg(out.message, out.success);
+        if (out.success) loadData();
+      }
+    }
+
+    loadData();
+  </script>
+</body>
+</html>'''
+
+class ContactServerHandler(http.server.BaseHTTPRequestHandler):
+    def send_json(self, status, payload):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path in ["/", "/index.html"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(get_html_frontend().encode("utf-8"))
+        elif parsed.path == "/api/contacts":
+            params = urllib.parse.parse_qs(parsed.query)
+            query = params.get("q", [None])[0]
+            data = search_contacts(query) if query else get_all_contacts()
+            self.send_json(200, data)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        if self.path == "/api/contacts":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8")
+            data = json.loads(body) if body else {}
+            success, msg = add_contact(data.get("name"), data.get("phone"), data.get("email"))
+            self.send_json(200 if success else 400, {"success": success, "message": msg})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_PUT(self):
+        if self.path == "/api/contacts":
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length).decode("utf-8")
+            data = json.loads(body) if body else {}
+            success, msg = update_contact(
+                data.get("original_phone"),
+                data.get("name"),
+                data.get("phone"),
+                data.get("email")
+            )
+            self.send_json(200 if success else 400, {"success": success, "message": msg})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/contacts":
+            params = urllib.parse.parse_qs(parsed.query)
+            phone = params.get("phone", [None])[0]
+            if not phone:
+                self.send_json(400, {"success": False, "message": "Phone number required."})
+                return
+            success, msg = delete_contact(phone)
+            self.send_json(200 if success else 400, {"success": success, "message": msg})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def run():
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("", PORT), ContactServerHandler) as httpd:
+        print("=" * 60)
+        print(" CONTACT BOOK SERVER STARTED SUCCESSFULLY")
+        print(f" Access your application here: http://localhost:{PORT}")
+        print(" Press Ctrl + C to exit.")
+        print("=" * 60)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nServer closed.")
+
+if __name__ == "__main__":
+    run()
